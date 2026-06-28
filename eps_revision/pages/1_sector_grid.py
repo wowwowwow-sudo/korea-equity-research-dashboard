@@ -70,8 +70,9 @@ def _render_card(sec: dict) -> None:
 
         st.divider()
 
-        # 종목 리스트
-        for i, c in enumerate(cos):
+        # 종목 리스트 (그리드에서는 상위 5개만 미리보기)
+        cos_preview = cos[:5]
+        for i, c in enumerate(cos_preview):
             sc  = c["total"]
             bon = c["bonus"]
             pc  = c["pc"]
@@ -109,7 +110,7 @@ def _render_card(sec: dict) -> None:
                     unsafe_allow_html=True,
                 )
 
-            if i < len(cos) - 1:
+            if i < len(cos_preview) - 1:
                 st.markdown(
                     "<hr style='margin:5px 0;border:none;border-top:1px solid #1c2038'>",
                     unsafe_allow_html=True,
@@ -125,10 +126,10 @@ def _render_card(sec: dict) -> None:
             st.switch_page("pages/2_sector_detail.py")
 
 
-# ── 5열 그리드 (3행 × 5열 = 13카드) ─────────────────────────────────────────
-for row_start in range(0, len(SECTORS), 5):
-    row_secs = SECTORS[row_start: row_start + 5]
-    cols = st.columns(5, gap="medium")
+# ── 4열 그리드 (4행 × 4열 = 13카드) ─────────────────────────────────────────
+for row_start in range(0, len(SECTORS), 4):
+    row_secs = SECTORS[row_start: row_start + 4]
+    cols = st.columns(4, gap="medium")
     for col, sec in zip(cols, row_secs):
         with col:
             _render_card(sec)
