@@ -232,7 +232,7 @@ _LEGACY: dict[str, dict] = {
 
 # ── 유니버스 CSV 로딩 ─────────────────────────────────────────────────────────
 def _load_universe() -> pd.DataFrame:
-    csv_path = Path(__file__).parent / "data" / "종목_유니버스_260628.csv"
+    csv_path = Path(__file__).parent.parent.parent / "data" / "종목_유니버스_260628.csv"
     df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig")
     df.columns = df.columns.str.strip()
     df = df[["종목코드", "종목명", "시가총액", "섹터"]].copy()
