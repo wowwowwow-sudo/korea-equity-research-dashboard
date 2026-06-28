@@ -96,6 +96,290 @@ class StockInput:
 
 
 # =============================================================================
+# 수급 스코어 데이터 스키마 + 계산 로직
+# =============================================================================
+@dataclass
+class SupplyInput:
+    """
+    수급 서브스코어 입력값.
+
+    단위 규칙:
+    - net_buy, trading_value, adv20, market_cap, balance 값은 서로 같은 금액 단위여야 한다.
+      예: 전부 원, 전부 백만원, 전부 억원 중 하나로 통일.
+    - *_ratio, *_change 값은 소수로 입력한다. 예: 5% = 0.05, -12% = -0.12.
+    - distance_to_20d_high는 현재가/20일고가 - 1. 예: 고가 대비 -3% = -0.03.
+
+    설계:
+    - 수급 점수 25점 = 외국인·기관 10 + 지속성 3 + 거래·가격반응 5 + 대차·공매도 4 + 신용·개인과열 3.
+    - ETF·패시브 일반 수급은 기본 수급 점수에서 제외. 지수 편입/리밸런싱 등은 이벤트 보너스로 별도 처리.
+    - 결측값은 중립점수(해당 배점의 50%)로 처리하고 flags에 남긴다.
+    """
+    ticker: str
+    sector: str = ""
+
+    # 기준 유동성/규모
+    adv20: Optional[float] = None                         # 20일 평균 거래대금
+    market_cap: Optional[float] = None                    # 시가총액
+
+    # 외국인·기관 순매수
+    foreign_net_buy_5d: Optional[float] = None
+    institution_net_buy_5d: Optional[float] = None
+    foreign_institution_net_buy_20d: Optional[float] = None
+    foreign_institution_net_buy_5d: Optional[float] = None
+    foreign_institution_net_buy_prev_5d: Optional[float] = None
+    foreign_institution_buy_days_10: Optional[int] = None  # 최근 10거래일 중 외국인+기관 순매수 일수
+
+    # 거래대금·가격 반응
+    trading_value_today: Optional[float] = None
+    return_5d: Optional[float] = None
+    return_20d: Optional[float] = None
+    distance_to_20d_high: Optional[float] = None           # 현재가/20일고가 - 1
+
+    # 대차·공매도 부담
+    loan_balance_mcap_ratio: Optional[float] = None        # 대차잔고/시총
+    loan_balance_change_5d: Optional[float] = None
+    loan_balance_change_20d: Optional[float] = None
+    short_sell_value_ratio: Optional[float] = None         # 공매도 거래대금/전체 거래대금
+    short_interest_ratio: Optional[float] = None           # 공매도 잔고/시총, 있으면 보조 사용
+
+    # 신용·개인 과열
+    credit_balance_mcap_ratio: Optional[float] = None      # 신용잔고/시총
+    credit_balance_change_5d: Optional[float] = None
+    credit_balance_change_20d: Optional[float] = None
+    individual_net_buy_5d: Optional[float] = None
+
+
+SUPPLY_WEIGHTS = {
+    "foreign_institution_flow": 10.0,
+    "flow_persistence": 3.0,
+    "trading_price_reaction": 5.0,
+    "borrow_short_pressure": 4.0,
+    "credit_retail_overheat": 3.0,
+}
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _score_between(
+    value: Optional[float],
+    *,
+    bad: float,
+    good: float,
+    points: float,
+    flags: Optional[list[str]] = None,
+    label: str = "",
+) -> float:
+    """
+    bad 값이면 0점, good 값이면 만점, 중간은 선형 보간.
+    good < bad인 역방향 지표도 지원한다. None은 중립점수.
+    """
+    if value is None or not math.isfinite(value):
+        if flags is not None and label:
+            flags.append(f"{label} 결측 — 중립점수 적용")
+        return points * 0.5
+    if good == bad:
+        return points * 0.5
+    ratio = (value - bad) / (good - bad)
+    return _clamp(ratio, 0.0, 1.0) * points
+
+
+def _safe_divide(numer: Optional[float], denom: Optional[float]) -> Optional[float]:
+    """numer/denom. 분모가 0/None/음수면 None."""
+    if numer is None or denom is None:
+        return None
+    if denom <= 0:
+        return None
+    return numer / denom
+
+
+def _avg_optional(values: list[Optional[float]]) -> Optional[float]:
+    valid = [v for v in values if v is not None and math.isfinite(v)]
+    return sum(valid) / len(valid) if valid else None
+
+
+def compute_supply_score(s: SupplyInput) -> dict:
+    """
+    수급 서브스코어 0~25점 계산.
+
+    반환 스키마:
+    {
+      "supply_score": float,       # 0~25
+      "buckets": {...},           # 5개 버킷별 점수
+      "evidence": {...},          # 화면 카드용 정규화 지표
+      "insight": str,
+      "flags": [...],
+      "weights": SUPPLY_WEIGHTS,
+    }
+    """
+    flags: list[str] = []
+
+    # -------------------------------------------------------------------------
+    # Evidence: 금액 → ADV20 대비 강도, ratio는 그대로 사용
+    # -------------------------------------------------------------------------
+    foreign_5d_adv = _safe_divide(s.foreign_net_buy_5d, s.adv20)
+    institution_5d_adv = _safe_divide(s.institution_net_buy_5d, s.adv20)
+    fi_20d_adv = _safe_divide(s.foreign_institution_net_buy_20d, s.adv20)
+    fi_5d_adv = _safe_divide(s.foreign_institution_net_buy_5d, s.adv20)
+    fi_prev_5d_adv = _safe_divide(s.foreign_institution_net_buy_prev_5d, s.adv20)
+    fi_5d_accel = None if fi_5d_adv is None or fi_prev_5d_adv is None else fi_5d_adv - fi_prev_5d_adv
+
+    trading_value_ratio = _safe_divide(s.trading_value_today, s.adv20)
+    price_momentum = _avg_optional([s.return_5d, s.return_20d])
+    loan_change = _avg_optional([s.loan_balance_change_5d, s.loan_balance_change_20d])
+    credit_change = _avg_optional([s.credit_balance_change_5d, s.credit_balance_change_20d])
+    individual_5d_adv = _safe_divide(s.individual_net_buy_5d, s.adv20)
+
+    # 공매도는 거래대금 비중을 우선 사용하고, 없으면 잔고비율을 보조로 사용
+    short_pressure = s.short_sell_value_ratio if s.short_sell_value_ratio is not None else s.short_interest_ratio
+
+    evidence = {
+        "foreign_5d_adv": foreign_5d_adv,
+        "institution_5d_adv": institution_5d_adv,
+        "foreign_institution_20d_adv": fi_20d_adv,
+        "foreign_institution_5d_adv": fi_5d_adv,
+        "foreign_institution_prev_5d_adv": fi_prev_5d_adv,
+        "foreign_institution_5d_accel": fi_5d_accel,
+        "foreign_institution_buy_days_10": s.foreign_institution_buy_days_10,
+        "trading_value_ratio": trading_value_ratio,
+        "return_5d": s.return_5d,
+        "return_20d": s.return_20d,
+        "price_momentum": price_momentum,
+        "distance_to_20d_high": s.distance_to_20d_high,
+        "loan_balance_mcap_ratio": s.loan_balance_mcap_ratio,
+        "loan_balance_change": loan_change,
+        "short_pressure": short_pressure,
+        "credit_balance_mcap_ratio": s.credit_balance_mcap_ratio,
+        "credit_balance_change": credit_change,
+        "individual_5d_adv": individual_5d_adv,
+    }
+
+    # -------------------------------------------------------------------------
+    # 1) 외국인·기관 순매수 강도 10점
+    # -------------------------------------------------------------------------
+    flow_score = 0.0
+    flow_score += _score_between(foreign_5d_adv, bad=-0.30, good=0.50, points=3.0, flags=flags, label="외국인 5일 순매수/ADV20")
+    flow_score += _score_between(institution_5d_adv, bad=-0.30, good=0.50, points=2.0, flags=flags, label="기관 5일 순매수/ADV20")
+    flow_score += _score_between(fi_20d_adv, bad=-1.00, good=1.50, points=3.0, flags=flags, label="외국인+기관 20일 순매수/ADV20")
+
+    # 동반 순매수: 둘 다 양수 2점, 하나만 양수 1점, 둘 다 음수 0점, 결측 중립 1점
+    if foreign_5d_adv is None or institution_5d_adv is None:
+        flags.append("외국인·기관 동반 순매수 여부 결측 — 중립점수 적용")
+        flow_score += 1.0
+    elif foreign_5d_adv > 0 and institution_5d_adv > 0:
+        flow_score += 2.0
+    elif foreign_5d_adv > 0 or institution_5d_adv > 0:
+        flow_score += 1.0
+
+    # -------------------------------------------------------------------------
+    # 2) 수급 지속성·전환 3점
+    # -------------------------------------------------------------------------
+    if s.foreign_institution_buy_days_10 is None:
+        flags.append("최근 10일 순매수일수 결측 — 중립점수 적용")
+        buy_days_score = 0.75
+    else:
+        buy_days_score = _clamp(s.foreign_institution_buy_days_10, 0, 10) / 10.0 * 1.5
+
+    accel_score = _score_between(fi_5d_accel, bad=-0.30, good=0.30, points=1.5, flags=flags, label="최근 5일 수급강도 개선")
+    persistence_score = buy_days_score + accel_score
+
+    # -------------------------------------------------------------------------
+    # 3) 거래대금·가격 반응 5점
+    # -------------------------------------------------------------------------
+    trading_price_score = 0.0
+    trading_price_score += _score_between(trading_value_ratio, bad=0.50, good=2.00, points=2.0, flags=flags, label="거래대금/ADV20")
+    trading_price_score += _score_between(price_momentum, bad=-0.15, good=0.20, points=2.0, flags=flags, label="5일·20일 가격 모멘텀")
+    trading_price_score += _score_between(s.distance_to_20d_high, bad=-0.20, good=0.00, points=1.0, flags=flags, label="20일 신고가 근접도")
+
+    # -------------------------------------------------------------------------
+    # 4) 대차·공매도 부담 4점 — 낮을수록 좋고, 감소하면 긍정
+    # -------------------------------------------------------------------------
+    borrow_short_score = 0.0
+    borrow_short_score += _score_between(s.loan_balance_mcap_ratio, bad=0.05, good=0.005, points=1.5, flags=flags, label="대차잔고/시총")
+    borrow_short_score += _score_between(loan_change, bad=0.20, good=-0.20, points=1.5, flags=flags, label="대차잔고 변화율")
+    borrow_short_score += _score_between(short_pressure, bad=0.20, good=0.02, points=1.0, flags=flags, label="공매도 부담")
+
+    # 높은 대차잔고가 감소하면서 주가가 오르는 경우는 숏커버 가능성으로 소폭 보정
+    if (
+        s.loan_balance_mcap_ratio is not None and s.loan_balance_mcap_ratio >= 0.03
+        and loan_change is not None and loan_change < -0.05
+        and price_momentum is not None and price_momentum > 0
+    ):
+        borrow_short_score = min(4.0, borrow_short_score + 0.3)
+        flags.append("대차잔고 감소+주가 상승 — 숏커버 가능성 보정")
+
+    # -------------------------------------------------------------------------
+    # 5) 신용·개인 과열 3점 — 낮을수록 좋고, 개인 쏠림은 감점
+    # -------------------------------------------------------------------------
+    credit_retail_score = 0.0
+    credit_retail_score += _score_between(s.credit_balance_mcap_ratio, bad=0.10, good=0.01, points=1.2, flags=flags, label="신용잔고/시총")
+    credit_retail_score += _score_between(credit_change, bad=0.20, good=-0.10, points=1.2, flags=flags, label="신용잔고 변화율")
+    credit_retail_score += _score_between(individual_5d_adv, bad=0.50, good=-0.30, points=0.6, flags=flags, label="개인 5일 순매수/ADV20")
+
+    buckets = {
+        "foreign_institution_flow": round(flow_score, 4),
+        "flow_persistence": round(persistence_score, 4),
+        "trading_price_reaction": round(trading_price_score, 4),
+        "borrow_short_pressure": round(borrow_short_score, 4),
+        "credit_retail_overheat": round(credit_retail_score, 4),
+    }
+    supply_score = round(sum(buckets.values()), 4)
+    supply_score = _clamp(supply_score, 0.0, 25.0)
+
+    insight = generate_supply_insight(supply_score, buckets, evidence)
+
+    return {
+        "supply_score": supply_score,
+        "buckets": buckets,
+        "evidence": evidence,
+        "insight": insight,
+        "flags": flags,
+        "weights": SUPPLY_WEIGHTS,
+    }
+
+
+def generate_supply_insight(score: float, buckets: dict[str, float], evidence: dict) -> str:
+    """수급 점수 요약 문장."""
+    lead_bucket = max(buckets, key=lambda k: buckets[k]) if buckets else "foreign_institution_flow"
+    weak_bucket = min(buckets, key=lambda k: buckets[k]) if buckets else "borrow_short_pressure"
+
+    bucket_label = {
+        "foreign_institution_flow": "외국인·기관 순매수",
+        "flow_persistence": "수급 지속성",
+        "trading_price_reaction": "거래대금·가격 반응",
+        "borrow_short_pressure": "대차·공매도 부담",
+        "credit_retail_overheat": "신용·개인 과열",
+    }
+
+    if score >= 19:
+        tone = "수급 우수"
+    elif score >= 15:
+        tone = "수급 양호"
+    elif score >= 11:
+        tone = "수급 중립"
+    elif score >= 7:
+        tone = "수급 부담"
+    else:
+        tone = "수급 취약"
+
+    fi20 = evidence.get("foreign_institution_20d_adv")
+    loan = evidence.get("loan_balance_mcap_ratio")
+    credit = evidence.get("credit_balance_mcap_ratio")
+
+    details = []
+    if fi20 is not None:
+        details.append(f"외국인+기관 20일 순매수 {fi20:+.1%}/ADV20")
+    if loan is not None:
+        details.append(f"대차잔고/시총 {loan:.1%}")
+    if credit is not None:
+        details.append(f"신용잔고/시총 {credit:.1%}")
+
+    detail_txt = ", ".join(details) if details else "핵심 수급 데이터 결측"
+    return f"{tone}: {bucket_label[lead_bucket]} 기여가 크고, {bucket_label[weak_bucket]} 항목은 점검 필요. ({detail_txt})"
+
+
+# =============================================================================
 # 공통 가드 유틸
 # =============================================================================
 def _safe_ratio(numer: Optional[float], denom: Optional[float]) -> Optional[float]:
