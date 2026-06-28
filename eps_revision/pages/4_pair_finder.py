@@ -216,8 +216,34 @@ with lc2:
     with st.container(border=True):
         st.markdown(
             f"**숏 후보 — {long_co['secName']} 섹터 내 "
-            f"({len(pairs)}종목, EPS 점수 낮은 순)**"
+            f"({len(pairs)}종목 · 상위 5개 표시)**"
         )
+
+        # ── 숏 후보 선정 기준 설명 ───────────────────────────────────────
+        with st.expander("📌 숏 후보 선정 기준", expanded=False):
+            st.markdown(
+                """
+<div style='font-size:0.82rem;line-height:1.8;color:#8899bb'>
+
+**1. 동일 섹터 내 종목만 대상**
+&nbsp;&nbsp;롱 종목과 같은 섹터의 종목만 비교합니다. 섹터 공통 매크로 리스크를 헤지하고 순수한 종목 간 상대적 우열을 포착하기 위함입니다.
+
+**2. EPS 리비전 점수 낮은 순 정렬**
+&nbsp;&nbsp;애널리스트 컨센서스 EPS 추정치가 지속적으로 하향 조정되는 종목일수록 숏 우선순위가 높습니다. 점수가 낮을수록(음수일수록) 실적 기대감이 무너지고 있는 신호입니다.
+
+**3. 페어 점수차 (EPS 롱 − EPS 숏)**
+&nbsp;&nbsp;롱 종목의 EPS 점수에서 숏 후보의 EPS 점수를 뺀 값입니다. 값이 클수록 두 종목의 실적 방향성 차이가 크고 페어 수익 가능성이 높습니다.
+
+**4. 차입 비용 (br)**
+&nbsp;&nbsp;숏 포지션 유지에 드는 연 차입비용입니다. 2.5% 초과 시 수익성을 잠식할 수 있어 경고 표시됩니다.
+
+**5. 신뢰도 (Confidence)**
+&nbsp;&nbsp;EPS 리비전 계산에 사용된 데이터의 충분성·일관성 지표입니다. 낮을수록 신호의 노이즈가 큽니다.
+
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
         if not pairs:
             st.caption("같은 섹터에 다른 종목이 없습니다.")
@@ -240,12 +266,12 @@ with lc2:
                 unsafe_allow_html=True,
             )
 
-            for idx, pair in enumerate(pairs):
+            def _render_pair_row(idx: int, pair: dict) -> None:
                 pc     = pair["co"]
                 is_sel = st.session_state.get(sel_key) == pair["t"]
                 bg     = "rgba(255,64,96,.08)" if is_sel else "transparent"
 
-                se = pair["short_eps"]
+                se     = pair["short_eps"]
                 se_col = "#00c87a" if (se or 0) >= 20 else (
                          "#ff4060" if (se or 0) <= -20 else "#ffaa00")
                 se_str = f"{se:+.0f}" if se is not None else "—"
@@ -302,11 +328,21 @@ with lc2:
                         st.session_state[sel_key] = pair["t"]
                         st.rerun()
 
-                if idx < len(pairs) - 1:
-                    st.markdown(
-                        "<hr style='margin:2px 0;border:none;border-top:1px solid #1c2038'>",
-                        unsafe_allow_html=True,
-                    )
+                st.markdown(
+                    "<hr style='margin:2px 0;border:none;border-top:1px solid #1c2038'>",
+                    unsafe_allow_html=True,
+                )
+
+            # 상위 5개 항상 표시
+            TOP_N = 5
+            for idx, pair in enumerate(pairs[:TOP_N]):
+                _render_pair_row(idx, pair)
+
+            # 나머지는 펼치기
+            if len(pairs) > TOP_N:
+                with st.expander(f"나머지 {len(pairs) - TOP_N}개 후보 더 보기"):
+                    for idx, pair in enumerate(pairs[TOP_N:], start=TOP_N):
+                        _render_pair_row(idx, pair)
 
             sel_pair = next(
                 (p for p in pairs if p["t"] == st.session_state.get(sel_key)),
