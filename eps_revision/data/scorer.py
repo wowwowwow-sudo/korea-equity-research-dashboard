@@ -153,7 +153,6 @@ if __name__ == "__main__":
 
 
 # ── 일봉 어댑터 (pair_panel·pair_tech_panel 용) ──────────────────────────────
-import pandas as pd
 from datetime import datetime, timedelta
 
 def get_price_df(ticker: str):
@@ -164,20 +163,26 @@ def get_price_df(ticker: str):
     return df
 
 def _load_daily(ticker: str):
-    """pykrx로 최근 280일 일봉 로드. 실패 시 None."""
+    """yfinance로 최근 280일 일봉 로드 (KOSPI→.KS, KOSDAQ→.KQ 순 시도). 실패 시 None."""
     try:
-        from pykrx import stock as krx
-        end   = datetime.today().strftime("%Y%m%d")
-        start = (datetime.today() - timedelta(days=280)).strftime("%Y%m%d")
-        df = krx.get_market_ohlcv_by_date(start, end, ticker)
-        if df is None or df.empty:
-            return None
-        df = df.reset_index()
-        df = df.rename(columns={"날짜": "date", "종가": "close", "거래대금": "value"})
-        df["value"] = df["value"] / 100_000_000
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        df = df[["date", "close", "value"]].dropna(subset=["close"])
-        return df if len(df) >= 20 else None
+        import yfinance as yf
+        end   = datetime.today()
+        start = end - timedelta(days=280)
+        s, e  = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+        for suffix in [".KS", ".KQ"]:
+            df = yf.download(ticker + suffix, start=s, end=e,
+                             progress=False, auto_adjust=True)
+            if df is not None and not df.empty:
+                df = df.reset_index()
+                # yfinance 0.2.x: MultiIndex 컬럼 평탄화
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                df = df.rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
+                df["close"]  = pd.to_numeric(df["close"],  errors="coerce")
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+                df["value"]  = df["close"] * df["volume"] / 100_000_000  # 억 원 환산
+                df["date"]   = pd.to_datetime(df["date"]).dt.tz_localize(None)
+                df = df[["date", "close", "value"]].dropna(subset=["close"])
+                return df if len(df) >= 20 else None
+        return None
     except Exception:
         return None
