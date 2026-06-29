@@ -237,8 +237,8 @@ def _load_universe() -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     df = df[["종목코드", "종목명", "시가총액", "섹터"]].copy()
     df = df.dropna(subset=["종목코드", "섹터"])
+    df["섹터"] = df["섹터"].str.strip()          # ← 이 줄 추가
     df["종목코드"] = df["종목코드"].str.strip().str.zfill(6)
-    # 알파벳 포함 특수코드 제외 (pykrx 조회 불가)
     df = df[df["종목코드"].str.match(r"^\d{6}$")]
     df["시가총액"] = pd.to_numeric(df["시가총액"], errors="coerce").fillna(0)
     df["mkt_억"] = (df["시가총액"] / 1e8).astype(int)
