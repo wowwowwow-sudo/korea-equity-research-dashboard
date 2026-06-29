@@ -150,3 +150,34 @@ if __name__ == "__main__":
     print("=" * 80)
     import pprint
     pprint.pprint(get_stock_detail("005930"))
+
+
+# ── 일봉 어댑터 (pair_panel·pair_tech_panel 용) ──────────────────────────────
+import pandas as pd
+from datetime import datetime, timedelta
+
+def get_price_df(ticker: str):
+    """종목 코드 → 일봉 DataFrame(date, close, value). 없으면 None."""
+    df = _load_daily(str(ticker).zfill(6))
+    if df is None or df.empty:
+        return None
+    return df
+
+def _load_daily(ticker: str):
+    """pykrx로 최근 280일 일봉 로드. 실패 시 None."""
+    try:
+        from pykrx import stock as krx
+        end   = datetime.today().strftime("%Y%m%d")
+        start = (datetime.today() - timedelta(days=280)).strftime("%Y%m%d")
+        df = krx.get_market_ohlcv_by_date(start, end, ticker)
+        if df is None or df.empty:
+            return None
+        df = df.reset_index()
+        df = df.rename(columns={"날짜": "date", "종가": "close", "거래대금": "value"})
+        df["value"] = df["value"] / 100_000_000
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df[["date", "close", "value"]].dropna(subset=["close"])
+        return df if len(df) >= 20 else None
+    except Exception:
+        return None
