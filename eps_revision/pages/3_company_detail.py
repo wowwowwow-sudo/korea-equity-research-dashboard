@@ -56,17 +56,15 @@ def _ref_date_kst() -> str:
 
 @st.cache_data(ttl=86400)
 def _get_market_cap(ticker6: str, ref_date: str) -> tuple:
-    """pykrx로 시총 조회. 공휴일 등으로 비어 있으면 최대 5 영업일 이전 재시도."""
+    """yfinance로 시총 조회 (KOSPI → .KS, KOSDAQ → .KQ 순 시도)."""
     try:
-        from pykrx import stock as krx
-        d = datetime.strptime(ref_date, "%Y%m%d").date()
-        for _ in range(5):
-            d_str = d.strftime("%Y%m%d")
-            df = krx.get_market_cap_by_date(d_str, d_str, ticker6)
-            if not df.empty:
-                cap_eok = int(df["시가총액"].iloc[0]) // 100_000_000  # 원 → 억
-                return cap_eok, d_str
-            d -= timedelta(days=1)
+        import yfinance as yf
+        for suffix in [".KS", ".KQ"]:
+            info = yf.Ticker(ticker6 + suffix).info
+            mcap = info.get("marketCap")
+            if mcap:
+                cap_eok = int(mcap) // 100_000_000  # 원 → 억
+                return cap_eok, ref_date
         return None, ref_date
     except Exception:
         return None, ref_date
