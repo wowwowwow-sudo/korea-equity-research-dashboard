@@ -232,13 +232,18 @@ _LEGACY: dict[str, dict] = {
 
 # ── 유니버스 CSV 로딩 ─────────────────────────────────────────────────────────
 def _load_universe() -> pd.DataFrame:
-    csv_path = Path(__file__).parent.parent.parent / "data" / "종목_유니버스_260629.csv"
+    # 가장 최신 유니버스 CSV 자동 선택 (날짜 내림차순)
+    _data_dir = Path(__file__).parent.parent.parent / "data"
+    _candidates = sorted(_data_dir.glob("종목_유니버스_*.csv"), reverse=True)
+    if not _candidates:
+        raise FileNotFoundError(f"종목_유니버스_*.csv 파일이 {_data_dir}에 없습니다.")
+    csv_path = _candidates[0]
     df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig")
     df.columns = df.columns.str.strip()
     df = df[["종목코드", "종목명", "시가총액", "섹터"]].copy()
     df = df.dropna(subset=["종목코드", "섹터"])
-    df["섹터"] = df["섹터"].str.strip()          # ← 이 줄 추가
     df["종목코드"] = df["종목코드"].str.strip().str.zfill(6)
+    # 알파벳 포함 특수코드 제외 (pykrx 조회 불가)
     df = df[df["종목코드"].str.match(r"^\d{6}$")]
     df["시가총액"] = pd.to_numeric(df["시가총액"], errors="coerce").fillna(0)
     df["mkt_억"] = (df["시가총액"] / 1e8).astype(int)
@@ -248,9 +253,17 @@ def _load_universe() -> pd.DataFrame:
 _UNI = _load_universe()
 
 
+# SECTOR_META 키와 CSV 섹터명이 다를 때 매핑 (CSV 기준 정확한 값으로)
+_SEC_ALIAS: dict[str, str] = {
+    "금융·지주":         "금융지주",
+    "정유·화학·석유화학": "정유화학",
+}
+
+
 def _make_cos(sector_name: str) -> list[dict]:
     """섹터명 기준으로 해당 섹터 종목 리스트 생성."""
-    rows = _UNI[_UNI["섹터"] == sector_name].copy()
+    csv_name = _SEC_ALIAS.get(sector_name, sector_name)
+    rows = _UNI[_UNI["섹터"] == csv_name].copy()
     # 시가총액 내림차순 정렬
     rows = rows.sort_values("mkt_억", ascending=False)
 
